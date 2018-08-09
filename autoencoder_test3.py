@@ -3,29 +3,40 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv
 import datetime
+import sys
 
-dataPath = r"E:\School\Graduate_MS\0_Thesis\0_Data\tfRecords\tf_NC_all_2018_8_2__H18_M48_FS33_BandsVVVH.gz" # RADAR - S1
+#######################################################################################################################
+### USER DEFINED VARIABLES ############################################################################################
+#######################################################################################################################
+
+dataPath = r"E:\School\Graduate_MS\0_Thesis\0_Data\tfRecords\tf_NC_all_2018_7_9__H20_M38_FS33_BandsVVVH.gz" # RADAR - S1
 # dataPath = r"E:\School\Graduate_MS\Thesis\tfRecords\tf_NC_all_2018_7_11__H22_M31_FS33_BandsB11B8B4B3B2.gz"   # OPTICAL - S2
 # dataPath = r"E:\School\Graduate_MS\Thesis\tfRecords\tf_NC_all_2018_7_11__H22_M24_FS33_BandsRGBN.gz"   # OPTICAL - NAIP
+
 reader = tf.TFRecordReader()
 featureSize = 33
 batchSize = 10  # Number of samples in each batch
-epoch_num = 20    # Number of epochs to train the network
-lr = 0.0001       # Learning rate
+epoch_num = 300    # Number of epochs to train the network
+lr = 0.0005       # Learning rate
 batch_per_ep = 40
 bands = ['VV', 'VH']
 label = 'BIOMS'
 
-writeLossCSV = True
+writeLossCSV = False
 showReconstructedImages = True
 showLossGraph = True
 
-# Build the features dictionary
+#######################################################################################################################
+### Build the features dictionary #####################################################################################
+#######################################################################################################################
 labelDict = {label: tf.FixedLenFeature((), tf.float32)}
-columns = [tf.FixedLenFeature((featureSize, featureSize), tf.float32) for k in bands]
+columns = [tf.FixedLenFeature((featureSize, featureSize, 1), tf.float32) for k in bands]
 featuresDict = labelDict
 featuresDict.update(dict(zip(bands, columns)))
 
+#######################################################################################################################
+### FUNCTIONS FOR READING TFRECORDS ###################################################################################
+#######################################################################################################################
 def parse_tfrecord(example_proto):
     parsed_features = tf.parse_single_example(example_proto, featuresDict)
     labels = parsed_features.pop(label)
@@ -33,14 +44,15 @@ def parse_tfrecord(example_proto):
 
 def tfrecord_input_fn(fileName,
                       numEpochs=None,
-                      shuffle=True,
+                      shuffle=None,
                       batchSize=None):
   dataset = tf.data.TFRecordDataset(fileName, compression_type='GZIP')
   # Map the parsing function over the dataset
   dataset = dataset.map(parse_tfrecord)
   # Shuffle, batch, and repeat.
+  print(shuffle)
   if shuffle:
-    dataset = dataset.shuffle(buffer_size=batchSize * 10)
+    dataset = dataset.shuffle(buffer_size=(batchSize * 10))
   dataset = dataset.batch(batchSize)
   dataset = dataset.repeat(numEpochs)
   # Make a one-shot iterator.
@@ -48,6 +60,9 @@ def tfrecord_input_fn(fileName,
   features, labels = iterator.get_next()
   return features, labels
 
+#######################################################################################################################
+### THE AUTOENCODER ###################################################################################################
+#######################################################################################################################
 def autoencoder(inputs):
     # newWidth = (Width - filterSize + 2*Padding) / Stride + 1
 
@@ -59,7 +74,7 @@ def autoencoder(inputs):
     # Second max-pooling layer: 16 x 16 x 16  ->  8 x 8 x 16
     #
     # Third convolutional layer: 8 x 8 x 16  ->  8 x 8 x 8
-    # Third max-pooling layer: 8 x 8 x 16  ->  2 x 2 x 8
+    # Third max-pooling layer: 8 x 8 x 8  ->  2 x 2 x 8
     #
     # Fourth convolutional layer: 1 x 1 x 16
     net = tf.layers.conv2d(inputs=inputs, filters=32, kernel_size=[5, 5], strides=1, padding='SAME', activation=tf.nn.relu)
@@ -86,7 +101,9 @@ def autoencoder(inputs):
     net = tf.layers.conv2d_transpose(inputs=net, filters=2, kernel_size=[5, 5], strides=2, padding='SAME', activation=tf.nn.relu)
     return net
 
-
+#######################################################################################################################
+### PREPPING THE SESSION ##############################################################################################
+#######################################################################################################################
 ae_inputs = tf.placeholder(tf.float32, (batchSize, featureSize-1, featureSize-1, len(bands)))
 ae_outputs = autoencoder(ae_inputs)  # runs the autoencoder
 
@@ -100,48 +117,61 @@ train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)
 # initialize the network
 init = tf.global_variables_initializer()
 
+trainImgs, trainLabels = tfrecord_input_fn(fileName=dataPath, shuffle=True, batchSize=batchSize)
+for i in range(len(bands)):
+    trainImgs[bands[i]] = tf.image.resize_image_with_crop_or_pad(trainImgs[bands[i]], featureSize-1, featureSize-1)
+
+testImgs, testLabels = tfrecord_input_fn(fileName=dataPath, shuffle=True, batchSize=batchSize)
+for i in range(len(bands)):
+    testImgs[bands[i]] = tf.image.resize_image_with_crop_or_pad(testImgs[bands[i]], featureSize-1, featureSize-1)
+
+myTest = 0
 lossList = []
 epList = []
 
+#######################################################################################################################
+### RUNNING THE SESSION ##############################################################################################
+#######################################################################################################################
 with tf.Session() as sess:
     sess.run(init)
     for ep in range(epoch_num):  # epochs loop
         for batch_n in range(batch_per_ep):  # batches loop
-            train1, train2 = tfrecord_input_fn(fileName=dataPath, shuffle=True, batchSize=batchSize)
-            a = sess.run([train1, train2])
-            toFeed = np.zeros((batchSize, featureSize-1, featureSize-1, len(bands)))
-            for i in range(len(a[0]["VH"])):
-                vh = np.delete(a[0]["VH"][i], featureSize-1, 0)
-                vh = np.delete(vh, featureSize-1, 1)
-                vh = np.resize(vh, (featureSize-1, featureSize-1, 1))
+            a = sess.run([trainImgs, trainLabels])
+            if myTest == sum(a[1]):
+                print(myTest == sum(a[1]))
+                sys.exit()
+            myTest = sum(a[1])
 
-                vv = np.delete(a[0]["VV"][i], featureSize-1, 0)
-                vv = np.delete(vv, featureSize-1, 1)
-                vv = np.resize(vv, (featureSize-1, featureSize-1, 1))
-                temp = np.dstack((vv, vh))
-                toFeed[i] = temp
+            toFeed = np.zeros((batchSize, featureSize-1, featureSize-1, len(bands)))
+            for i in range(batchSize):
+                temp = []
+                for b in range(len(bands)):
+                    temp.append(a[0][bands[b]][b])
+                resizedImgs = np.dstack(tuple(temp))
+                toFeed[i] = resizedImgs
+                del resizedImgs, temp
 
             _, c = sess.run([train_op, loss], feed_dict={ae_inputs: toFeed})
             lossList.append(c)
             epList.append(ep)
-            print('Epoch: {} - cost= {:.5f}'.format((ep + 1), c))
+            print('Epoch: {} - cost = {:.5f}'.format((ep + 1), c))
     # test the trained network
-    test1, test2 = tfrecord_input_fn(fileName=dataPath, shuffle=True, batchSize=batchSize)
-    a = sess.run([test1, test2])
-    toFeed = np.zeros((batchSize, featureSize-1, featureSize-1, len(bands)))
-    for i in range(len(a[0]["VH"])):
-        vh = np.delete(a[0]["VH"][i], featureSize - 1, 0)
-        vh = np.delete(vh, featureSize - 1, 1)
-        vh = np.resize(vh, (featureSize - 1, featureSize - 1, 1))
 
-        vv = np.delete(a[0]["VV"][i], featureSize - 1, 0)
-        vv = np.delete(vv, featureSize - 1, 1)
-        vv = np.resize(vv, (featureSize - 1, featureSize - 1, 1))
-        temp = np.dstack((vv, vh))
-        toFeed[i] = temp
+    a = sess.run([testImgs, testLabels])
+    toFeed = np.zeros((batchSize, featureSize - 1, featureSize - 1, len(bands)))
+    for i in range(batchSize):
+        temp = []
+        for b in range(len(bands)):
+            temp.append(a[0][bands[b]][b])
+        resizedImgs = np.dstack(tuple(temp))
+        toFeed[i] = resizedImgs
+        del resizedImgs, temp
 
     recon_img = sess.run([ae_outputs], feed_dict={ae_inputs: toFeed})[0]
 
+    ####################################################################################################################
+    ### FOLLOWUP GRAPHS AND IMAGES #####################################################################################
+    ####################################################################################################################
     if writeLossCSV:
         # Make a csv of the loss for each batch. Do with it what you will
         now = datetime.datetime.now()
